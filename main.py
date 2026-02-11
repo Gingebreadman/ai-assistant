@@ -1,35 +1,69 @@
 import os
+import argparse
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
+from prompts import system_prompt
+from call_function import available_functions
+
+
 
 def main():
     print("Hello from ai-assistant!")
 
+    # --- Argument parsing ---
+    parser = argparse.ArgumentParser(description="Chatbot")
+    parser.add_argument("user_prompt", type=str, help="User prompt")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    args = parser.parse_args()
+
+    # --- Build messages list ---
+    messages = [
+        types.Content(
+            role="user",
+            parts=[types.Part(text=args.user_prompt)]
+        )
+    ]
+
+    # --- Load API key ---
     load_dotenv()
     api_key = os.environ.get("GEMINI_API_KEY")
 
     if api_key is None:
         raise RuntimeError("Environment Variable Not Found")
 
+    # --- Create Gemini client ---
     client = genai.Client(api_key=api_key)
 
-    prompt = "Why is Boot.dev such a great place to learn backend development? Use one paragraph maximum."
-
+    # --- Call Gemini ---
     response = client.models.generate_content(
         model="gemini-2.5-flash",
-        contents=prompt
+        contents=messages,
+        config=types.GenerateContentConfig(
+            tools=[available_functions],
+            system_instruction=system_prompt,
+            temperature=0  # optional but recommended for deterministic tests
+        ),
     )
 
-    # --- NEW: Validate usage metadata ---
+    if response.function_calls:
+        for function_call in response.function_calls:
+            print(f"Calling function: {function_call.name}({function_call.args})")
+    else:
+        print("Response:")
+        print(response.text)
+
+    # --- Validate usage metadata ---
     if response.usage_metadata is None:
         raise RuntimeError("API request failed: no usage metadata returned")
 
-    # --- NEW: Print token counts ---
-    print(f"User prompt: {prompt}")
-    print(f"Prompt tokens: {response.usage_metadata.prompt_token_count}")
-    print(f"Response tokens: {response.usage_metadata.candidates_token_count}")
+    # --- Verbose output (only if --verbose flag is used) ---
+    if args.verbose:
+        print(f"User prompt: {args.user_prompt}")
+        print(f"Prompt tokens: {response.usage_metadata.prompt_token_count}")
+        print(f"Response tokens: {response.usage_metadata.candidates_token_count}")
 
-    # --- Print the model response ---
+    # --- Always print the model response ---
     print("Response:")
     print(response.text)
 
