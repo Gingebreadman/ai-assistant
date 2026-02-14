@@ -3,21 +3,35 @@ import argparse
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from prompts import system_prompt
-from call_function import available_functions
 
+from prompts import system_prompt
+from call_function import available_functions, call_function
 
 
 def main():
     print("Hello from ai-assistant!")
 
-    # --- Argument parsing ---
-    parser = argparse.ArgumentParser(description="Chatbot")
+    # -----------------------------
+    # Parse CLI arguments
+    # -----------------------------
+    parser = argparse.ArgumentParser(description="AI Agent")
     parser.add_argument("user_prompt", type=str, help="User prompt")
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
     args = parser.parse_args()
 
-    # --- Build messages list ---
+    # -----------------------------
+    # Load API key
+    # -----------------------------
+    load_dotenv()
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key is None:
+        raise RuntimeError("Environment Variable Not Found")
+
+    client = genai.Client(api_key=api_key)
+
+    # -----------------------------
+    # Initialize conversation
+    # -----------------------------
     messages = [
         types.Content(
             role="user",
@@ -25,47 +39,70 @@ def main():
         )
     ]
 
-    # --- Load API key ---
-    load_dotenv()
-    api_key = os.environ.get("GEMINI_API_KEY")
+    # -----------------------------
+    # Agent Loop
+    # -----------------------------
+    for _ in range(20):
 
-    if api_key is None:
-        raise RuntimeError("Environment Variable Not Found")
+        # 1. Call the model
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=messages,
+            config=types.GenerateContentConfig(
+                tools=[available_functions],
+                system_instruction=system_prompt,
+                temperature=0
+            ),
+        )
 
-    # --- Create Gemini client ---
-    client = genai.Client(api_key=api_key)
+        # 2. Add model candidates to conversation history
+        if response.candidates:
+            for c in response.candidates:
+                messages.append(c.content)
 
-    # --- Call Gemini ---
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=messages,
-        config=types.GenerateContentConfig(
-            tools=[available_functions],
-            system_instruction=system_prompt,
-            temperature=0  # optional but recommended for deterministic tests
-        ),
-    )
+        # 3. If no function calls → final answer
+        if not response.function_calls:
+            print("Final response:")
+            print(response.text)
+            return
 
-    if response.function_calls:
-        for function_call in response.function_calls:
-            print(f"Calling function: {function_call.name}({function_call.args})")
-    else:
-        print("Response:")
-        print(response.text)
+        # 4. Execute function calls
+        function_results = []
 
-    # --- Validate usage metadata ---
-    if response.usage_metadata is None:
-        raise RuntimeError("API request failed: no usage metadata returned")
+        for fc in response.function_calls:
+            function_call_result = call_function(fc, verbose=args.verbose)
 
-    # --- Verbose output (only if --verbose flag is used) ---
-    if args.verbose:
-        print(f"User prompt: {args.user_prompt}")
-        print(f"Prompt tokens: {response.usage_metadata.prompt_token_count}")
-        print(f"Response tokens: {response.usage_metadata.candidates_token_count}")
+            # Validate returned Content object
+            if not function_call_result.parts:
+                raise RuntimeError("Function call returned no parts")
 
-    # --- Always print the model response ---
-    print("Response:")
-    print(response.text)
+            fr = function_call_result.parts[0].function_response
+            if fr is None:
+                raise RuntimeError("Function response missing")
+
+            if fr.response is None:
+                raise RuntimeError("Function response missing .response field")
+
+            # Save result for next iteration
+            function_results.append(function_call_result.parts[0])
+
+            if args.verbose:
+                print(f"-> {fr.response}")
+
+        # 5. Add function results to conversation history
+        messages.append(
+            types.Content(
+                role="user",
+                parts=function_results
+            )
+        )
+
+    # -----------------------------
+    # Loop ended without final answer
+    # -----------------------------
+    print("Error: Agent exceeded maximum iterations without producing a final response.")
+    exit(1)
+
 
 if __name__ == "__main__":
     main()
